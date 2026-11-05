@@ -35,25 +35,31 @@ function canonicalContentSource(value: string): string | undefined {
   return CANONICAL_CONTENT_SOURCES[value.toLowerCase()];
 }
 
-function targetForUrl(value: string, context: ResourceRewriteContext): AssetTarget | undefined {
+export function targetForUrl(value: string, context: ResourceRewriteContext): AssetTarget | undefined {
   let url: URL;
   try {
     url = new URL(value, context.upstreamOrigin);
   } catch {
     return undefined;
   }
-  if (url.origin !== new URL(context.upstreamOrigin).origin) return undefined;
-  const parts = url.pathname.split("/").filter(Boolean).map((part) => decodeURIComponent(part));
+  if (url.origin !== new URL(context.upstreamOrigin).origin || url.username || url.password || url.search || url.hash) return undefined;
+  let parts: string[];
+  try {
+    parts = url.pathname.split("/").slice(1).map((part) => decodeURIComponent(part));
+  } catch {
+    return undefined;
+  }
+  if (parts.some((part) => !part || /[/\\\u0000-\u0020\u007f]/.test(part) || part === "." || part === "..")) return undefined;
   const apiIndex = parts[0] === "m1" && parts[1] === "api"
     ? 2
     : parts[0] === "api"
       ? 1
       : -1;
   if (apiIndex < 0) return undefined;
-  if (parts[apiIndex] === "asset" && parts[apiIndex + 1]) {
+  if (parts[apiIndex] === "asset" && parts[apiIndex + 1] && parts.length === apiIndex + 2) {
     return { kind: "asset", id: parts[apiIndex + 1] };
   }
-  if (parts[apiIndex] === "source" && parts[apiIndex + 2] === "graphic" && parts[apiIndex + 3]) {
+  if (parts[apiIndex] === "source" && parts[apiIndex + 2] === "graphic" && parts[apiIndex + 3] && parts.length === apiIndex + 4) {
     const source = canonicalContentSource(parts[apiIndex + 1] ?? "");
     if (!source) return undefined;
     return { kind: "graphic", source, id: parts[apiIndex + 3] };

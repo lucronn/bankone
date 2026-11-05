@@ -6,7 +6,7 @@ import { SessionManager } from "../../src/auth/session-manager.js";
 import { loadConfig } from "../../src/config.js";
 import type { HttpTransport } from "../../src/http/http-client.js";
 import { createApp } from "../../src/server.js";
-import { encodeReference } from "../../src/source-contract/references.js";
+import { decodeReference, encodeReference } from "../../src/source-contract/references.js";
 import { UpstreamApiClient } from "../../src/upstream/upstream-client.js";
 
 const config = loadConfig({
@@ -131,6 +131,69 @@ describe("Bankone source contract", () => {
     const imageAccept = await app.inject({ method: "GET", url: `/v1/resources/${assetRef}`, headers: { accept: "image/png" } });
     expect(imageAccept.headers["content-type"]).toContain("application/json");
     expect(imageAccept.json().media_type).toBe("image/png");
+    await app.close();
+  });
+
+
+  it("binds decoded image sources to authenticated refs without changing raw source evidence", async () => {
+    const html = '<p>Before</p><img src="api/asset/second"><table><tr><td><img src="/m1/api/asset/first&#58;diagram"></td></tr></table>'
+      + '<img src="api/asset/second"><img src="/api/asset/amp&amp;part">'
+      + '<img src="/api/asset/ambiguous&notit;=x"><img src="/api/asset/erase&#11;x">'
+      + '<img src="/api/asset/wrong" SRC="/api/asset/last"><p>After</p>';
+    const app = await appWithTransport(async (request) => {
+      if (request.url.includes("/article/a1")) return json({ html });
+      if (request.url.endsWith("/asset/second")) return { status: 200, headers: { "content-type": "image/png" }, body: Buffer.from([1, 2, 3]) };
+      throw new Error("Unexpected upstream target");
+    });
+    const articleRef = encodeReference({ kind: "article", catalog: "Toyota", vehicleId: "v1", articleId: "a1" }, config.sourceRefs);
+    const response = await app.inject({ method: "GET", url: `/v1/resources/${articleRef}` });
+    expect(response.statusCode).toBe(200);
+    const body = response.json();
+    expect(body.content).toBe(html);
+    expect(body.sha256).toBe(createHash("sha256").update(html).digest("hex"));
+    expect(response.headers["x-source-sha256"]).toBe(body.sha256);
+    expect(body.source_revision).toBe(`sha256:${createHash("sha256").update(json({ html }).body).digest("hex")}`);
+    expect(body.asset_bindings.map((binding: { source_url: string }) => binding.source_url)).toEqual([
+      "api/asset/second", "/m1/api/asset/first:diagram", "/api/asset/amp&part", "/api/asset/ambiguous&notit;=x", "/api/asset/erasex", "/api/asset/last",
+    ]);
+    const decoded = body.asset_bindings.map((binding: { resource_ref: string }) => {
+      expect(body.asset_resource_refs).toContain(binding.resource_ref);
+      return decodeReference(binding.resource_ref, config.sourceRefs, "asset");
+    });
+    expect(decoded).toEqual(["second", "first:diagram", "amp&part", "ambiguous&notit;=x", "erasex", "last"].map((assetId) => ({ kind: "asset", catalog: "Toyota", assetKind: "asset", assetId })));
+    const asset = await app.inject({ method: "GET", url: `/v1/resources/${body.asset_bindings[0].resource_ref}` });
+    expect(asset.statusCode).toBe(200);
+    expect(asset.json()).toMatchObject({ media_type: "image/png", content_base64: "AQID" });
+    await app.close();
+  });
+
+  it("does not bind forged, unrelated or malformed image URLs", async () => {
+    const html = [
+      "https://evil.invalid/api/asset/stolen", "https://sites.motor.com.evil.invalid/api/asset/stolen",
+      "https://user:pass@sites.motor.com/api/asset/stolen", "//evil.invalid/api/asset/stolen",
+      "javascript:alert(1)", "data:image/png;base64,AAEC", "/api/asset/a/extra", "/api/asset/%2Fsecret",
+      "/api/asset/%ZZ", "/api/asset/a?token=secret", "/api/asset/a#fragment", "/api/source/Unknown/graphic/a",
+    ].map((src) => `<img src="${src}" data-resource-ref="forged">`).join("");
+    const app = await appWithTransport(async () => json({ html }));
+    const ref = encodeReference({ kind: "article", catalog: "Toyota", vehicleId: "v1", articleId: "a1" }, config.sourceRefs);
+    const response = await app.inject({ method: "GET", url: `/v1/resources/${ref}` });
+    expect(response.statusCode).toBe(200);
+    expect(response.json().content).toBe(html);
+    expect(response.json()).not.toHaveProperty("asset_bindings");
+    await app.close();
+  });
+
+  it("bounds image bindings to declared refs and preserves first source order", async () => {
+    const html = Array.from({ length: 130 }, (_, index) => `<img src="/api/asset/figure-${index}">`).join("");
+    const app = await appWithTransport(async () => json({ html }));
+    const ref = encodeReference({ kind: "article", catalog: "Toyota", vehicleId: "v1", articleId: "a1" }, config.sourceRefs);
+    const response = await app.inject({ method: "GET", url: `/v1/resources/${ref}` });
+    expect(response.statusCode).toBe(200);
+    const body = response.json();
+    expect(body.asset_bindings).toHaveLength(128);
+    expect(body.asset_resource_refs).toHaveLength(128);
+    expect(body.asset_bindings[127].source_url).toBe("/api/asset/figure-127");
+    for (const binding of body.asset_bindings) expect(body.asset_resource_refs).toContain(binding.resource_ref);
     await app.close();
   });
 
