@@ -262,6 +262,17 @@ components:
             content: { type: string, maxLength: 10000000 }
             sha256: { type: string, pattern: '^[a-f0-9]{64}$' }
             asset_resource_refs: { type: array, maxItems: 128, items: { type: string, maxLength: 2048 } }
+            asset_bindings:
+              type: array
+              maxItems: 128
+              description: Authenticated connector bindings from exact decoded HTML image src values to declared opaque asset refs. Source content and its SHA-256 remain unchanged. Duplicate source URLs are omitted after their first occurrence.
+              items:
+                type: object
+                additionalProperties: false
+                required: [source_url, resource_ref]
+                properties:
+                  source_url: { type: string, minLength: 1, maxLength: 2048, pattern: '^[^\x00-\x1f\x7f-\x9f]+$' }
+                  resource_ref: { type: string, minLength: 1, maxLength: 2048 }
     BinaryResource:
       allOf:
         - { $ref: '#/components/schemas/SourceEnvelope' }
