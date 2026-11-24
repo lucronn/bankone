@@ -24,9 +24,23 @@ describe("UPSTREAM route registry", () => {
     }, "https://sites.motor.com", ["GeneralMotors"])).toThrow(/content source/i);
   });
 
-  it("describes only read-only GET routes", () => {
+  it("uses POST only for the read-only, scoped Motor engine lookup", () => {
     const routes = Object.values(UPSTREAM_ROUTES);
-    expect(routes.every((route) => route.method === "GET")).toBe(true);
+    expect(routes.filter((route) => route.method !== "GET").map((route) => route.id)).toEqual(["motorVehicleBatch"]);
     expect(routes.some((route) => route.id === "bookmark" || route.id === "feedback")).toBe(false);
+    expect(buildUpstreamRequest("motorVehicleBatch", { vehicleIds: ["12345:678"] }, "https://sites.motor.com"))
+      .toEqual({ url: "https://sites.motor.com/m1/api/source/Motor/vehicles", method: "POST",
+        responseKind: "json", body: '{"vehicleIds":["12345:678"]}' });
+    expect(() => buildUpstreamRequest("motorVehicleBatch", { vehicleIds: ["2016:Ford:Expedition"] }, "https://sites.motor.com"))
+      .toThrow(/engine references/);
+  });
+
+  it("scopes the Ford model mapping to the enabled Motor source", () => {
+    const request = buildUpstreamRequest("fordMotorVehicles", { vehicleId: "2016:Ford:Expedition" }, "https://sites.motor.com");
+    expect(request.url).toBe("https://sites.motor.com/m1/api/source/Ford/2016%3AFord%3AExpedition/motorvehicles");
+    expect(() => buildUpstreamRequest("fordMotorVehicles", { vehicleId: "2016:Ford:Expedition" },
+      "https://sites.motor.com", ["GeneralMotors"])).toThrow(/Motor content source/);
+    expect(() => buildUpstreamRequest("fordMotorVehicles", { vehicleId: "2016:Ford:%2e%2e%2f" },
+      "https://sites.motor.com")).toThrow(/model reference/);
   });
 });

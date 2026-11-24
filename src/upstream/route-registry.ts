@@ -3,17 +3,19 @@ import { ConnectorError } from "../errors.js";
 export type UpstreamRouteParams = Record<string, unknown>;
 
 export type UpstreamRequest = {
-  method: "GET";
+  method: "GET" | "POST";
   url: string;
   responseKind: "json" | "text";
+  body?: string;
 };
 
 type RouteDefinition = {
   id: string;
-  method: "GET";
+  method: UpstreamRequest["method"];
   responseKind: "json" | "text";
   path: (params: UpstreamRouteParams) => string;
   query: readonly string[];
+  body?: (params: UpstreamRouteParams) => string;
 };
 
 const segment = (params: UpstreamRouteParams, name: string): string => {
@@ -25,6 +27,10 @@ const segment = (params: UpstreamRouteParams, name: string): string => {
 };
 
 const path = (...parts: string[]): string => `/m1/api/${parts.join("/")}`;
+
+export function isMotorEngineId(value: unknown): value is string {
+  return typeof value === "string" && /^[0-9]{1,20}:[0-9]{1,20}$/.test(value);
+}
 
 export const UPSTREAM_ROUTES = {
   years: {
@@ -61,6 +67,34 @@ export const UPSTREAM_ROUTES = {
     responseKind: "json",
     path: (params) => path("source", segment(params, "contentSource"), "vehicles"),
     query: ["vehicleIds"],
+  },
+  fordMotorVehicles: {
+    id: "fordMotorVehicles",
+    method: "GET",
+    responseKind: "json",
+    path: (params) => {
+      if (typeof params.vehicleId !== "string" ||
+          !/^[0-9]{4}:Ford:[^:/\\?#%\x00-\x1f\x7f]{1,160}$/.test(params.vehicleId)) {
+        throw new ConnectorError("invalid_request", "Invalid Ford model reference", 400);
+      }
+      // This fixed lookup maps an advertised Ford model to Motor engine IDs.
+      return path("source", "Ford", segment(params, "vehicleId"), "motorvehicles");
+    },
+    query: [],
+  },
+  motorVehicleBatch: {
+    id: "motorVehicleBatch",
+    method: "POST",
+    responseKind: "json",
+    path: () => path("source", "Motor", "vehicles"),
+    query: [],
+    body: ({ vehicleIds }) => {
+      if (!Array.isArray(vehicleIds) || !vehicleIds.length || vehicleIds.length > 200 ||
+          !vehicleIds.every(isMotorEngineId)) {
+        throw new ConnectorError("invalid_request", "Invalid Motor engine references", 400);
+      }
+      return JSON.stringify({ vehicleIds });
+    },
   },
   vehicleDetails: {
     id: "vehicleDetails",
@@ -180,10 +214,14 @@ export function buildUpstreamRequest(
   apiOrigin: string,
   allowedContentSources: readonly string[] = ["GeneralMotors", "Motor", "Toyota"],
 ): UpstreamRequest {
-  const route = UPSTREAM_ROUTES[routeId];
+  const route: RouteDefinition = UPSTREAM_ROUTES[routeId];
   const contentSource = params.contentSource;
   if (contentSource !== undefined && !allowedContentSources.includes(String(contentSource))) {
     throw new ConnectorError("invalid_request", "content source is not allowed", 400);
+  }
+  if ((routeId === "fordMotorVehicles" || routeId === "motorVehicleBatch") &&
+      !allowedContentSources.includes("Motor")) {
+    throw new ConnectorError("invalid_request", "Motor content source is not allowed", 400);
   }
 
   const origin = new URL(apiOrigin);
@@ -196,5 +234,8 @@ export function buildUpstreamRequest(
     .join("&");
   if (query) url.search = query;
 
-  return { method: route.method, url: url.toString(), responseKind: route.responseKind };
+  return {
+    method: route.method, url: url.toString(), responseKind: route.responseKind,
+    ...(route.body ? { body: route.body(params) } : {}),
+  };
 }

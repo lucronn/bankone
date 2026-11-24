@@ -41,7 +41,7 @@ paths:
             schema: { $ref: '#/components/schemas/VehicleSelector' }
       responses:
         '200':
-          description: Zero or more source vehicle candidates. Rows with a declared North American country or engine displacement that contradicts the selector are excluded.
+          description: Zero or more source vehicle candidates. Rows with a declared North American country or engine displacement that contradicts the selector are excluded. Ford model selections can resolve through supplier-provided engine mappings. The mapped records must support the requested drivetrain and displacement.
           content:
             application/json:
               schema: { $ref: '#/components/schemas/VehicleResolutionResponse' }

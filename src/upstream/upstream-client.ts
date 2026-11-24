@@ -37,7 +37,9 @@ export class UpstreamApiClient {
       headers: {
         accept: request.responseKind === "json" ? "application/json" : "text/plain, application/xml;q=0.9, */*;q=0.8",
         cookie: session.cookieJar.toHeader(Math.floor(Date.now() / 1000)),
+        ...(request.body === undefined ? {} : { "content-type": "application/json" }),
       },
+      ...(request.body === undefined ? {} : { body: request.body }),
     }, { maxResponseBytes });
     const setCookie = response.headers["set-cookie"];
     if (setCookie) session.cookieJar.addSetCookie(setCookie, Math.floor(Date.now() / 1000));

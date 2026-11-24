@@ -62,6 +62,8 @@ The provider-neutral source contract lives at `/v1`. Bankone implements `GET /v1
 
 Catalog and vehicle routes:
 
+When the supplier advertises a Ford model and Motor is enabled, vehicle resolution uses the supplier's Ford engine mapping and issues only confirmed Motor vehicle references. The Ford mapping operation is internal to vehicle resolution and does not add Ford to the public content-source allowlist.
+
 | Connector route | Upstream resource |
 | --- | --- |
 | `GET /v1/api/years` | `/m1/api/years` |
