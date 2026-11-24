@@ -43,4 +43,14 @@ describe("UPSTREAM route registry", () => {
     expect(() => buildUpstreamRequest("fordMotorVehicles", { vehicleId: "2016:Ford:%2e%2e%2f" },
       "https://sites.motor.com")).toThrow(/model reference/);
   });
+
+  it("binds the internal Ford name lookup to a mapped Motor engine", () => {
+    const params = { vehicleId: "2016:Ford:Expedition", motorVehicleId: "12345:678" };
+    expect(buildUpstreamRequest("fordVehicleName", params, "https://sites.motor.com").url)
+      .toBe("https://sites.motor.com/m1/api/source/Ford/2016%3AFord%3AExpedition/name?motorVehicleId=12345%3A678");
+    expect(() => buildUpstreamRequest("fordVehicleName", params, "https://sites.motor.com", ["GeneralMotors"]))
+      .toThrow(/Motor content source/);
+    expect(() => buildUpstreamRequest("fordVehicleName", { ...params, motorVehicleId: "Expedition" }, "https://sites.motor.com"))
+      .toThrow(/Motor engine reference/);
+  });
 });

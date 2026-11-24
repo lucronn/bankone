@@ -12,13 +12,14 @@ import type { AssetTarget } from "../content/url-rewriter.js";
 import { normalizeHtml } from "../content/html-normalizer.js";
 
 const PAGE_SIZE = 100;
+const FORD_NAME_LOOKUP_LIMIT = 16;
 type RecordValue = Record<string, unknown>;
 type SourceContext = { requestId: string; request: FastifyRequest; reply: FastifyReply; deps: ApiRouteDependencies };
 type Fetched = { envelope: UpstreamEnvelope<unknown>; bytes: Buffer };
 type VehicleSelector = { year: number; make: string; model: string; vin?: string };
-type ModelMatches = { sources: Buffer[]; catalog: string; vehicles: RecordValue[]; fordMapped?: true };
+type ModelMatches = { sources: Buffer[]; catalog: string; vehicles: RecordValue[]; fordModelId?: string };
 
-const driveWords = /\b(?:[24]\s*wd|[afr]\s*wd)\b/gi;
+const driveWords = /\b(?:[24]\s*wd|[afr]\s*wd|4\s*x\s*4|(?:four|4)[ -]+wheel[ -]+drive)\b/gi;
 const displacementWords = /(?<![\d.])(\d+(?:\.\d+)?)\s*l\b/gi;
 
 function fail(code: string, message: string, status: number, retryable = false): never {
@@ -78,10 +79,25 @@ function declaredDisplacement(label: string): number | undefined {
   return litres.size === 1 ? litres.values().next().value : undefined;
 }
 function drivetrainLabels(text: string): Set<string> {
-  return new Set(Array.from(text.matchAll(driveWords), (match) => normalizeLabel(match[0])));
+  return new Set(Array.from(text.matchAll(driveWords), (match) => {
+    const label = normalizeLabel(match[0]);
+    return ["4x4", "4wheeldrive", "fourwheeldrive"].includes(label) ? "4wd" : label;
+  }));
 }
 function fordFamily(text: string): string {
   return normalizeLabel(text.replace(driveWords, ""));
+}
+
+function fordVariantMatch(labels: string, engine: string, requestedEngine: number | undefined,
+    requestedDrive: Set<string>, requestedTrim: string): boolean | undefined {
+  const knownDrive = drivetrainLabels(labels);
+  if (requestedDrive.size && knownDrive.size &&
+      (requestedDrive.size !== 1 || knownDrive.size !== 1 || !knownDrive.has([...requestedDrive][0]))) return false;
+  const knownEngines = Array.from(`${engine} ${labels}`.matchAll(displacementWords), (match) => Number(match[1]));
+  if (requestedEngine !== undefined && knownEngines.some((value) => value !== requestedEngine)) return false;
+  if ((requestedDrive.size && !knownDrive.size) || (requestedEngine !== undefined && !knownEngines.length))
+    return undefined;
+  return !requestedTrim || normalizeLabel(labels).includes(requestedTrim);
 }
 
 function advertisedFordModelId(selector: VehicleSelector, model: RecordValue): string {
@@ -106,7 +122,7 @@ async function mappedFordVehicles(
   const modelIds = [...new Set(models.filter((model) =>
     fordFamily(textField(model, "modelName", "model", "name")) === fordFamily(selector.model),
   ).map((model) => advertisedFordModelId(selector, model)))];
-  if (!modelIds.length) return { sources, catalog: "Motor", vehicles: [], fordMapped: true };
+  if (!modelIds.length) return { sources, catalog: "Motor", vehicles: [] };
   if (modelIds.length !== 1) fail("INVALID_UPSTREAM_RESPONSE", "Ford model identity is ambiguous", 502);
   if (!ctx.deps.config.upstream.allowedContentSources.includes("Motor"))
     fail("UPSTREAM_UNAVAILABLE", "Motor vehicle lookup is unavailable", 502, true);
@@ -127,7 +143,7 @@ async function mappedFordVehicles(
     }
   }
   const vehicleIds = [...namedEngines.keys()];
-  if (!vehicleIds.length) return { sources, catalog: "Motor", vehicles: [], fordMapped: true };
+  if (!vehicleIds.length) return { sources, catalog: "Motor", vehicles: [], fordModelId: modelIds[0] };
   if (vehicleIds.length > 200) fail("INVALID_UPSTREAM_RESPONSE", "Vehicle selection exceeds the supported bound", 502);
   const details = await fetchSource(ctx, "motorVehicleBatch", { vehicleIds });
   sources.push(details.bytes);
@@ -143,7 +159,7 @@ async function mappedFordVehicles(
   });
   if (new Set(vehicles.map((item) => textField(item, "vehicleId", "id", "vehicle_id"))).size !== vehicleIds.length)
     fail("INVALID_UPSTREAM_RESPONSE", "Motor lookup did not confirm the mapped engines", 502, true);
-  return { sources, catalog: "Motor", vehicles, fordMapped: true };
+  return { sources, catalog: "Motor", vehicles, fordModelId: modelIds[0] };
 }
 async function fetchSource(ctx: SourceContext, routeId: UpstreamRouteId, params: UpstreamRouteParams): Promise<Fetched> {
   const admission = ctx.deps.clientRateLimiter.check(ctx.request.ip || "unknown");
@@ -277,14 +293,18 @@ export function registerSourceContractRoutes(app: FastifyInstance, deps: ApiRout
       items = result.vehicles.map((item) => {
         const vehicleId = textField(item, "vehicleId", "id", "vehicle_id");
         if (!vehicleId) return null;
-        const label = textField(item, "vehicleName", "displayName", "name", "modelName") || `${requestedYear} ${requestedMake} ${requestedModel}`;
+        const sourceLabel = textField(item, "vehicleName", "displayName", "name", "modelName") ||
+          (result.fordModelId ? textField(item, "fordMappingLabel") : "");
+        const label = sourceLabel || (result.fordModelId
+          ? `${requestedYear} ${requestedMake} configuration`
+          : `${requestedYear} ${requestedMake} ${requestedModel}`);
         const engine = textField(item, "engine", "engineName", "engineDescription");
         const drivetrain = textField(item, "drivetrain", "driveType", "driveTrain");
         const region = textField(item, "region", "market");
         return {
           opaque_ref: encodeReference({ kind: "vehicle", catalog: result.catalog, vehicleId }, deps.config.sourceRefs),
           label: label.slice(0, 512), year: requestedYear, make: requestedMake, model: requestedModel,
-          configuration: label.slice(0, 512),
+          ...((sourceLabel || !result.fordModelId) ? { configuration: label.slice(0, 512) } : {}),
           ...(engine ? { engine: engine.slice(0, 256) } : {}),
           ...(drivetrain ? { drivetrain: drivetrain.slice(0, 128) } : {}),
           ...(region ? { region: region.slice(0, 64) } : {}),
@@ -305,37 +325,56 @@ export function registerSourceContractRoutes(app: FastifyInstance, deps: ApiRout
     const requestedEngine = declaredDisplacement(selector.configuration ?? "");
     const requestedDrive = drivetrainLabels(`${selector.model} ${selector.configuration ?? ""}`);
     const requestedTrim = normalizeLabel((selector.configuration ?? "").replace(displacementWords, "").replace(driveWords, ""));
-    let incompleteFordIdentity = false;
+    const needsFordName: { vehicleId: string; labels: string; engine: string }[] = [];
+    const candidate = (vehicleId: string, label: string) => ({
+      opaque_ref: encodeReference({ kind: "vehicle", catalog: result.catalog, vehicleId }, deps.config.sourceRefs),
+      label: label.slice(0, 512),
+      confidence: selector.configuration ? 0.95 : 0.8,
+      evidence: [`${selector.year} ${selector.make} ${selector.model}`],
+    });
     const candidates = result.vehicles.map((item) => {
       const vehicleId = textField(item, "vehicleId", "id", "vehicle_id");
       if (!vehicleId) return null;
-      const mappedLabel = result.fordMapped ? textField(item, "fordMappingLabel") : "";
-      const label = textField(item, "vehicleName", "displayName", "name", "modelName") ||
-        mappedLabel || `${selector.year} ${selector.make} ${selector.model}`;
       const region = marketCode(textField(item, "region"));
       const market = marketCode(textField(item, "market"));
       if (requestedMarket && ((region && region !== requestedMarket) || (market && market !== requestedMarket))) return null;
-      const engine = declaredDisplacement(textField(item, "engine", "engineName", "engineDescription")) ?? declaredDisplacement(label);
-      if (requestedEngine !== undefined && engine !== undefined && engine !== requestedEngine) return null;
-      if (result.fordMapped) {
-        const knownDrive = drivetrainLabels(`${label} ${mappedLabel} ${textField(item, "drivetrain", "driveType", "driveTrain")}`);
-        if (requestedDrive.size && knownDrive.size &&
-            (requestedDrive.size !== 1 || knownDrive.size !== 1 || !knownDrive.has([...requestedDrive][0]))) return null;
-        const mappedEngine = declaredDisplacement(mappedLabel);
-        if (requestedEngine !== undefined &&
-            (engine !== undefined || mappedEngine !== undefined) &&
-            [engine, mappedEngine].some((value) => value !== undefined && value !== requestedEngine)) return null;
-        if ((requestedDrive.size && !knownDrive.size) ||
-            (requestedEngine !== undefined && engine === undefined && mappedEngine === undefined)) {
-          incompleteFordIdentity = true;
-          return null;
-        }
-        if (requestedTrim && !normalizeLabel(`${label} ${mappedLabel}`).includes(requestedTrim)) return null;
-      } else if (selector.configuration && !normalizeLabel(label).includes(normalizeLabel(selector.configuration))) return null;
-      return { opaque_ref: encodeReference({ kind: "vehicle", catalog: result.catalog, vehicleId }, deps.config.sourceRefs), label: label.slice(0, 512), confidence: selector.configuration ? 0.95 : 0.8, evidence: [`${selector.year} ${selector.make} ${selector.model}`] };
+      const sourceLabel = textField(item, "vehicleName", "displayName", "name", "modelName");
+      const engine = textField(item, "engine", "engineName", "engineDescription");
+      if (result.fordModelId) {
+        const mappedLabel = textField(item, "fordMappingLabel");
+        const labels = [sourceLabel, mappedLabel, textField(item, "drivetrain", "driveType", "driveTrain")].join(" ");
+        const match = fordVariantMatch(labels, engine, requestedEngine, requestedDrive, requestedTrim);
+        if (match === undefined) needsFordName.push({ vehicleId, labels, engine });
+        return match ? candidate(vehicleId, sourceLabel || mappedLabel || `${selector.year} ${selector.make} configuration`) : null;
+      }
+      const label = sourceLabel || `${selector.year} ${selector.make} ${selector.model}`;
+      const displacement = declaredDisplacement(engine) ?? declaredDisplacement(label);
+      if (requestedEngine !== undefined && displacement !== undefined && displacement !== requestedEngine) return null;
+      if (selector.configuration && !normalizeLabel(label).includes(normalizeLabel(selector.configuration))) return null;
+      return candidate(vehicleId, label);
     }).filter((item): item is NonNullable<typeof item> => item !== null);
-    if (incompleteFordIdentity)
-      fail("INVALID_UPSTREAM_RESPONSE", "Ford lookup lacks required vehicle details", 502, true);
+    if (result.fordModelId && needsFordName.length) {
+      if (needsFordName.length > FORD_NAME_LOOKUP_LIMIT)
+        fail("INVALID_UPSTREAM_RESPONSE", "Ford lookup lacks required vehicle details", 502, true);
+      const names = await Promise.all(needsFordName.map(async (item) => {
+        const response = await fetchSource(ctx, "fordVehicleName", {
+          vehicleId: result.fordModelId, motorVehicleId: item.vehicleId,
+        }).catch((error: unknown) => {
+          if ((error as { sourceCode?: string }).sourceCode === "NOT_FOUND")
+            fail("INVALID_UPSTREAM_RESPONSE", "Ford lookup lacks required vehicle details", 502, true);
+          throw error;
+        });
+        const body = response.envelope.body;
+        const name = typeof body === "string" ? body.trim() : textField(body, "value");
+        return { ...item, name, bytes: response.bytes };
+      }));
+      for (const { vehicleId, labels, engine, name, bytes } of names) {
+        const match = fordVariantMatch(`${labels} ${name}`, engine, requestedEngine, requestedDrive, requestedTrim);
+        if (match === undefined) fail("INVALID_UPSTREAM_RESPONSE", "Ford lookup lacks required vehicle details", 502, true);
+        result.sources.push(bytes);
+        if (match) candidates.push(candidate(vehicleId, name));
+      }
+    }
     if (candidates.length > 100) fail("INVALID_UPSTREAM_RESPONSE", "Vehicle resolution exceeds the supported bound", 502);
     return { ...envelope(ctx, result.sources, locator("vehicle-resolution", selector)), selector, candidates };
   });
