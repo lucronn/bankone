@@ -35,6 +35,10 @@ async function appWithTransport(transport: HttpTransport, appConfig = config) {
   });
 }
 
+const fordSelector = { year: 2016, make: "Ford Truck", model: "Expedition 4wd", configuration: "3.5 L 4WD", region: "US" };
+const fordModelId = "2016%3AFord%3AExpedition";
+const fordEnginesPath = `/m1/api/source/Ford/${fordModelId}/motorvehicles`;
+
 describe("Bankone source contract", () => {
   it("resolves ambiguous model trims to stable opaque vehicle references", async () => {
     const paths: string[] = [];
@@ -83,6 +87,152 @@ describe("Bankone source contract", () => {
       expect(await resolve("Canada", "3.5L 4WD")).toEqual(["ca", "unmarked"]);
       expect(await resolve(undefined, "3.5L 4WD")).toEqual(["us", "ca", "unmarked"]);
       expect(await resolve("US")).toEqual(["us", "different-engine", "unmarked"]);
+    } finally {
+      await app.close();
+    }
+  });
+
+  it("resolves a Ford Expedition engine to the scoped Motor vehicle and opens its articles", async () => {
+    const requests: Parameters<HttpTransport>[0][] = [];
+    const engineIds = ["12345:678", "12345:679", "12345:680", "12345:681"];
+    const motorVehiclesPath = "/m1/api/source/Motor/vehicles";
+    const selectedVehiclePath = "/m1/api/source/Motor/vehicle/12345%3A678";
+    const vehicle = {
+      vehicleId: engineIds[0],
+      vehicleName: "Expedition 3.5L 4WD",
+      engineDescription: "3.5 L",
+      drivetrain: "4WD",
+      region: "US",
+    };
+    const articleHtml = "<h1>Oil Pump Replacement</h1>";
+    const app = await appWithTransport(async (request) => {
+      requests.push(request);
+      const path = new URL(request.url).pathname;
+      if (path === "/m1/api/year/2016/makes") return json([{ makeName: "Ford" }]);
+      if (path === "/m1/api/year/2016/make/Ford/models") {
+        return json({ contentSource: "Ford", models: [{ id: fordModelId, model: "Expedition" }] });
+      }
+      if (path === fordEnginesPath) {
+        return json([{ model: "Expedition", engines: engineIds.map((id) => ({ id, name: "Expedition engine" })) }]);
+      }
+      if (path === motorVehiclesPath) {
+        return json([
+          { ...vehicle, vehicleId: "99999:999" },
+          { ...vehicle, vehicleId: engineIds[1], region: "CA" },
+          { ...vehicle, vehicleId: engineIds[2], drivetrain: "RWD" },
+          { ...vehicle, vehicleId: engineIds[3], engineDescription: "5.0 L" },
+          vehicle,
+        ]);
+      }
+      if (path === `${selectedVehiclePath}/articles/v2`) return json({ articleDetails: [{ id: "a1", title: "Oil Pump Replacement" }] });
+      if (path === `${selectedVehiclePath}/article/a1`) return json({ html: articleHtml });
+      throw new Error(`Unexpected fixture route: ${path}`);
+    });
+    try {
+      const response = await app.inject({ method: "POST", url: "/v1/vehicle-resolutions", payload: fordSelector });
+      expect(response.statusCode, response.body).toBe(200);
+      expect(response.json()).toMatchObject({ provider: "bankone", selector: fordSelector });
+      const { candidates } = response.json();
+      expect(candidates).toHaveLength(1);
+      const { opaque_ref: vehicleRef } = candidates[0];
+      expect(decodeReference(vehicleRef, config.sourceRefs, "vehicle")).toEqual({ kind: "vehicle", catalog: "Motor", vehicleId: "12345:678" });
+
+      const workshopSelection = await app.inject({
+        method: "POST", url: "/v1/vehicle-resolutions", payload: { ...fordSelector, configuration: "3.5 L" },
+      });
+      expect(workshopSelection.statusCode, workshopSelection.body).toBe(200);
+      expect(workshopSelection.json().candidates).toHaveLength(1);
+      expect(workshopSelection.json().candidates[0].opaque_ref).toBe(vehicleRef);
+
+      const list = await app.inject({ method: "GET", url: `/v1/vehicles/${vehicleRef}/articles` });
+      expect(list.statusCode, list.body).toBe(200);
+      expect(list.json().articles).toMatchObject([{ title: "Oil Pump Replacement" }]);
+      const [article] = list.json().articles;
+      const content = await app.inject({ method: "GET", url: `/v1/resources/${article.resource_ref}` });
+      expect(content.statusCode, content.body).toBe(200);
+      expect(content.json().content).toBe(articleHtml);
+
+      const legacyFord = await app.inject({ method: "GET", url: `/v1/api/catalog/Ford/${fordModelId}/vehicle-details` });
+      expect(legacyFord.statusCode).toBe(400);
+      expect(legacyFord.json().error.code).toBe("invalid_request");
+      expect(requests.map((request) => {
+        const url = new URL(request.url);
+        return `${request.method} ${url.pathname}${url.search}`;
+      })).toEqual([
+        "GET /m1/api/year/2016/makes",
+        "GET /m1/api/year/2016/make/Ford/models",
+        `GET ${fordEnginesPath}`,
+        `POST ${motorVehiclesPath}`,
+        `GET ${selectedVehiclePath}/articles/v2`,
+        `GET ${selectedVehiclePath}/article/a1`,
+      ]);
+      const batch = requests.find((request) => request.method === "POST")!;
+      expect(batch.headers?.["content-type"]).toMatch(/^application\/json\b/i);
+      expect(JSON.parse(batch.body!.toString())).toEqual({ vehicleIds: engineIds });
+    } finally {
+      await app.close();
+    }
+  });
+
+  it.each([
+    { reason: "missing Ford model ID", model: { model: "Expedition" }, engines: undefined, status: 502 },
+    { reason: "double-encoded Ford model ID", model: { id: "2016%253AFord%253AExpedition", model: "Expedition" }, engines: undefined, status: 502 },
+    { reason: "missing Motor engine ID", model: { id: fordModelId, model: "Expedition" }, engines: [{ name: "3.5 L 4WD" }], status: 502 },
+    { reason: "untrusted Motor engine ID", model: { id: fordModelId, model: "Expedition" }, engines: [{ id: fordModelId, name: "3.5 L 4WD" }], status: 502 },
+    { reason: "explicitly empty Ford engine list", model: { id: fordModelId, model: "Expedition" }, engines: [], status: 200 },
+  ])("distinguishes vehicle availability with $reason", async ({ model, engines, status }) => {
+    const paths: string[] = [];
+    const app = await appWithTransport(async (request) => {
+      const path = new URL(request.url).pathname;
+      paths.push(path);
+      if (path === "/m1/api/year/2016/makes") return json([{ makeName: "Ford" }]);
+      if (path === "/m1/api/year/2016/make/Ford/models") return json({ contentSource: "Ford", models: [model] });
+      if (path === fordEnginesPath && engines !== undefined) return json([{ model: "Expedition", engines }]);
+      throw new Error(`Unexpected fixture route: ${path}`);
+    });
+    try {
+      const response = await app.inject({ method: "POST", url: "/v1/vehicle-resolutions", payload: fordSelector });
+      expect(response.statusCode, response.body).toBe(status);
+      if (status === 200) {
+        expect(response.json().candidates).toEqual([]);
+      } else {
+        expect(response.json().error.code).toBe("INVALID_UPSTREAM_RESPONSE");
+        expect(response.json()).not.toHaveProperty("candidates");
+      }
+      expect(paths).toEqual([
+        "/m1/api/year/2016/makes",
+        "/m1/api/year/2016/make/Ford/models",
+        ...(engines === undefined ? [] : [fordEnginesPath]),
+      ]);
+    } finally {
+      await app.close();
+    }
+  });
+
+  it.each([false, true])("does not treat incomplete Ford details as absent (%s)", async (missingIdentity) => {
+    const app = await appWithTransport(async (request) => {
+      const path = new URL(request.url).pathname;
+      if (path === "/m1/api/year/2016/makes") return json([{ makeName: "Ford" }]);
+      if (path === "/m1/api/year/2016/make/Ford/models") {
+        return json({ contentSource: "Ford", models: [{ id: fordModelId, model: "Expedition" }] });
+      }
+      if (path === fordEnginesPath) {
+        return json([{ model: "Expedition", engines: [
+          { id: "12345:678", name: "3.5 L" }, { id: "12345:679", name: "3.5 L" },
+        ] }]);
+      }
+      if (path === "/m1/api/source/Motor/vehicles") {
+        return json({ items: [
+          { vehicleId: "12345:678", model: "Expedition", engineDescription: "3.5 L" },
+          ...(missingIdentity ? [{ vehicleId: "12345:679", model: "Expedition", drivetrain: "2WD" }] : []),
+        ] });
+      }
+      throw new Error("Unexpected fixture route");
+    });
+    try {
+      const response = await app.inject({ method: "POST", url: "/v1/vehicle-resolutions", payload: fordSelector });
+      expect(response.statusCode, response.body).toBe(502);
+      expect(response.json().error.code).toBe("INVALID_UPSTREAM_RESPONSE");
     } finally {
       await app.close();
     }
