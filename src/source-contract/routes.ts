@@ -19,7 +19,12 @@ type Fetched = { envelope: UpstreamEnvelope<unknown>; bytes: Buffer };
 type VehicleSelector = { year: number; make: string; model: string; vin?: string };
 type ModelMatches = { sources: Buffer[]; catalog: string; vehicles: RecordValue[]; fordModelId?: string };
 
-const driveWords = /\b(?:[24]\s*wd|[afr]\s*wd|4\s*x\s*4|(?:four|4)[ -]+wheel[ -]+drive)\b/gi;
+const driveWords = /\b(?:[24]\s*wd|[afr]\s*wd|4\s*x\s*[24]|(?:four|4|two|2|all|front|rear)[ -]+wheel[ -]+drive)\b/gi;
+const driveAliases: Record<string, string> = {
+  "4x4": "4wd", "4wheeldrive": "4wd", fourwheeldrive: "4wd",
+  "4x2": "2wd", "2wheeldrive": "2wd", twowheeldrive: "2wd",
+  allwheeldrive: "awd", frontwheeldrive: "fwd", rearwheeldrive: "rwd",
+};
 const displacementWords = /(?<![\d.])(\d+(?:\.\d+)?)\s*l\b/gi;
 
 function fail(code: string, message: string, status: number, retryable = false): never {
@@ -81,7 +86,7 @@ function declaredDisplacement(label: string): number | undefined {
 function drivetrainLabels(text: string): Set<string> {
   return new Set(Array.from(text.matchAll(driveWords), (match) => {
     const label = normalizeLabel(match[0]);
-    return ["4x4", "4wheeldrive", "fourwheeldrive"].includes(label) ? "4wd" : label;
+    return driveAliases[label] ?? label;
   }));
 }
 function fordFamily(text: string): string {
@@ -342,9 +347,11 @@ export function registerSourceContractRoutes(app: FastifyInstance, deps: ApiRout
       const engine = textField(item, "engine", "engineName", "engineDescription");
       if (result.fordModelId) {
         const mappedLabel = textField(item, "fordMappingLabel");
-        const labels = [sourceLabel, mappedLabel, textField(item, "drivetrain", "driveType", "driveTrain")].join(" ");
-        const match = fordVariantMatch(labels, engine, requestedEngine, requestedDrive, requestedTrim);
-        if (match === undefined) needsFordName.push({ vehicleId, labels, engine });
+        const drives = [item.drivetrain, item.driveType, item.driveTrain].filter((value) => typeof value === "string");
+        const engineLabels = [item.engine, item.engineName, item.engineDescription].filter((value) => typeof value === "string").join(" ");
+        const labels = [sourceLabel, mappedLabel, ...drives].join(" ");
+        const match = fordVariantMatch(labels, engineLabels, requestedEngine, requestedDrive, requestedTrim);
+        if (match === undefined) needsFordName.push({ vehicleId, labels, engine: engineLabels });
         return match ? candidate(vehicleId, sourceLabel || mappedLabel || `${selector.year} ${selector.make} configuration`) : null;
       }
       const label = sourceLabel || `${selector.year} ${selector.make} ${selector.model}`;
@@ -356,19 +363,29 @@ export function registerSourceContractRoutes(app: FastifyInstance, deps: ApiRout
     if (result.fordModelId && needsFordName.length) {
       if (needsFordName.length > FORD_NAME_LOOKUP_LIMIT)
         fail("INVALID_UPSTREAM_RESPONSE", "Ford lookup lacks required vehicle details", 502, true);
+      const model = fordFamily(result.fordModelId.split(":")[2]);
       const names = await Promise.all(needsFordName.map(async (item) => {
         const response = await fetchSource(ctx, "fordVehicleName", {
           vehicleId: result.fordModelId, motorVehicleId: item.vehicleId,
         }).catch((error: unknown) => {
-          if ((error as { sourceCode?: string }).sourceCode === "NOT_FOUND")
+          if ((error as { sourceCode?: string })?.sourceCode === "NOT_FOUND")
             fail("INVALID_UPSTREAM_RESPONSE", "Ford lookup lacks required vehicle details", 502, true);
           throw error;
         });
         const body = response.envelope.body;
-        const name = typeof body === "string" ? body.trim() : textField(body, "value");
+        const value = body && typeof body === "object" && "value" in body ? body.value : body;
+        const name = typeof value === "string" ? value.trim() : "";
         return { ...item, name, bytes: response.bytes };
       }));
+      const nameCounts = new Map<string, number>();
+      for (const { name } of names) {
+        const key = normalizeLabel(name);
+        nameCounts.set(key, (nameCounts.get(key) ?? 0) + 1);
+      }
       for (const { vehicleId, labels, engine, name, bytes } of names) {
+        const key = normalizeLabel(name);
+        if (!key.includes(model) || nameCounts.get(key) !== 1)
+          fail("INVALID_UPSTREAM_RESPONSE", "Ford lookup lacks required vehicle details", 502, true);
         const match = fordVariantMatch(`${labels} ${name}`, engine, requestedEngine, requestedDrive, requestedTrim);
         if (match === undefined) fail("INVALID_UPSTREAM_RESPONSE", "Ford lookup lacks required vehicle details", 502, true);
         result.sources.push(bytes);
