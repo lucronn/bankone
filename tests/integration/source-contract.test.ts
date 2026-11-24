@@ -56,6 +56,38 @@ describe("Bankone source contract", () => {
     await app.close();
   });
 
+  it("excludes vehicle rows with an explicitly conflicting market or displacement", async () => {
+    const app = await appWithTransport(async (request) => {
+      if (request.url.endsWith("/year/2016/makes")) return json([{ makeName: "Ford" }]);
+      if (request.url.endsWith("/year/2016/make/Ford/models")) {
+        return json([{ modelName: "Expedition", vehicleIds: ["us", "ca", "different-engine", "unmarked"] }]);
+      }
+      if (request.url.includes("/source/Motor/vehicles")) return json([
+        { vehicleId: "us", vehicleName: "Expedition 3.5L 4WD", region: "United States" },
+        { vehicleId: "ca", vehicleName: "Expedition 3.5L 4WD", market: "CA" },
+        { vehicleId: "different-engine", vehicleName: "Expedition 13.5L 4WD", engineDescription: "13.5 L", region: "US" },
+        { vehicleId: "unmarked", vehicleName: "Expedition 3.5L 4WD" },
+      ]);
+      throw new Error(`Unexpected fixture route: ${new URL(request.url).pathname}`);
+    });
+    try {
+      const resolve = async (region?: string, configuration?: string) => {
+        const response = await app.inject({ method: "POST", url: "/v1/vehicle-resolutions", payload: {
+          year: 2016, make: "Ford Truck", model: "Expedition 4WD", region, configuration,
+        } });
+        expect(response.statusCode).toBe(200);
+        return response.json().candidates.map((candidate: { opaque_ref: string }) =>
+          decodeReference(candidate.opaque_ref, config.sourceRefs, "vehicle").vehicleId);
+      };
+      expect(await resolve("US", "3.5L 4WD")).toEqual(["us", "unmarked"]);
+      expect(await resolve("Canada", "3.5L 4WD")).toEqual(["ca", "unmarked"]);
+      expect(await resolve(undefined, "3.5L 4WD")).toEqual(["us", "ca", "unmarked"]);
+      expect(await resolve("US")).toEqual(["us", "different-engine", "unmarked"]);
+    } finally {
+      await app.close();
+    }
+  });
+
   it("paginates catalog data and binds the cursor to its scope", async () => {
     const app = await appWithTransport(async () => json(Array.from({ length: 101 }, (_, year) => 1900 + year)));
     const first = await app.inject({ method: "GET", url: "/v1/catalog/years" });

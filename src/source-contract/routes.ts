@@ -59,6 +59,18 @@ function publicBaseUrl(ctx: SourceContext): string {
 function locator(route: string, params: RecordValue): string {
   return `${route}:${sha256(Buffer.from(JSON.stringify(params))).slice(0, 24)}`;
 }
+function marketCode(value: string): string | undefined {
+  switch (normalizeLabel(value)) {
+    case "us": case "usa": case "unitedstates": case "unitedstatesofamerica": return "US";
+    case "ca": case "can": case "canada": return "CA";
+    case "mx": case "mex": case "mexico": return "MX";
+    default: return undefined;
+  }
+}
+function declaredDisplacement(label: string): number | undefined {
+  const litres = new Set(Array.from(label.matchAll(/(?<![\d.])(\d+(?:\.\d+)?)\s*l\b/gi), (match) => Number(match[1])));
+  return litres.size === 1 ? litres.values().next().value : undefined;
+}
 async function fetchSource(ctx: SourceContext, routeId: UpstreamRouteId, params: UpstreamRouteParams): Promise<Fetched> {
   const admission = ctx.deps.clientRateLimiter.check(ctx.request.ip || "unknown");
   if (!admission.allowed) {
@@ -210,10 +222,17 @@ export function registerSourceContractRoutes(app: FastifyInstance, deps: ApiRout
     onlyKeys(body, ["year", "make", "model", "configuration", "region", "vin"]);
     const selector = { year: year(body.year), make: string(body.make, "make", 160), model: string(body.model, "model", 160), ...(body.configuration ? { configuration: string(body.configuration, "configuration") } : {}), ...(body.region ? { region: string(body.region, "region", 64) } : {}), ...(body.vin ? { vin: string(body.vin, "vin", 32) } : {}) };
     const result = await matchingModels(ctx, selector);
+    const requestedMarket = marketCode(selector.region ?? "");
+    const requestedEngine = declaredDisplacement(selector.configuration ?? "");
     const candidates = result.vehicles.map((item) => {
       const vehicleId = textField(item, "vehicleId", "id", "vehicle_id");
       if (!vehicleId) return null;
       const label = textField(item, "vehicleName", "displayName", "name", "modelName") || `${selector.year} ${selector.make} ${selector.model}`;
+      const region = marketCode(textField(item, "region"));
+      const market = marketCode(textField(item, "market"));
+      if (requestedMarket && ((region && region !== requestedMarket) || (market && market !== requestedMarket))) return null;
+      const engine = declaredDisplacement(textField(item, "engine", "engineName", "engineDescription")) ?? declaredDisplacement(label);
+      if (requestedEngine !== undefined && engine !== undefined && engine !== requestedEngine) return null;
       if (selector.configuration && !normalizeLabel(label).includes(normalizeLabel(selector.configuration))) return null;
       return { opaque_ref: encodeReference({ kind: "vehicle", catalog: result.catalog, vehicleId }, deps.config.sourceRefs), label: label.slice(0, 512), confidence: selector.configuration ? 0.95 : 0.8, evidence: [`${selector.year} ${selector.make} ${selector.model}`] };
     }).filter((item): item is NonNullable<typeof item> => item !== null);
