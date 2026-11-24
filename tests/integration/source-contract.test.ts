@@ -209,7 +209,14 @@ describe("Bankone source contract", () => {
     }
   });
 
-  it.each([false, true])("does not treat incomplete Ford details as absent (%s)", async (missingIdentity) => {
+  it.each([
+    { reason: "partial Motor batch", batchComplete: false, nameStatus: 200 },
+    { reason: "no drivetrain", batchComplete: true, nameStatus: 200 },
+    { reason: "name not found", batchComplete: true, nameStatus: 404 },
+    { reason: "different model", batchComplete: true, nameStatus: 200, name: "2016 Ford F-150 3.5 L 4WD" },
+    { reason: "malformed wrapper", batchComplete: true, nameStatus: 200, name: { value: ["Expedition 3.5 L 4WD"] } },
+    { reason: "repeated name", batchComplete: true, nameStatus: 200, name: "Expedition 3.5 L 4WD", lookupBoth: true },
+  ])("does not treat incomplete Ford details as absent ($reason)", async ({ batchComplete, nameStatus, name, lookupBoth }) => {
     const app = await appWithTransport(async (request) => {
       const path = new URL(request.url).pathname;
       if (path === "/m1/api/year/2016/makes") return json([{ makeName: "Ford" }]);
@@ -224,15 +231,71 @@ describe("Bankone source contract", () => {
       if (path === "/m1/api/source/Motor/vehicles") {
         return json({ items: [
           { vehicleId: "12345:678", model: "Expedition", engineDescription: "3.5 L" },
-          ...(missingIdentity ? [{ vehicleId: "12345:679", model: "Expedition", drivetrain: "2WD" }] : []),
+          ...(batchComplete ? [{ vehicleId: "12345:679", model: "Expedition", ...(lookupBoth ? {} : { drivetrain: "2WD" }) }] : []),
         ] });
       }
+      if (path === `/m1/api/source/Ford/${fordModelId}/name`)
+        return { ...json(name ?? "Expedition 3.5 L"), status: nameStatus };
       throw new Error("Unexpected fixture route");
     });
     try {
       const response = await app.inject({ method: "POST", url: "/v1/vehicle-resolutions", payload: fordSelector });
       expect(response.statusCode, response.body).toBe(502);
       expect(response.json().error.code).toBe("INVALID_UPSTREAM_RESPONSE");
+      expect(response.json().error.message).toBe(batchComplete
+        ? "Ford lookup lacks required vehicle details"
+        : "Motor lookup did not confirm the mapped engines");
+    } finally {
+      await app.close();
+    }
+  });
+
+  it("uses the supplier name for the mapped engine and keeps catalog labels tied to source data", async () => {
+    const checkedNames: string[] = [];
+    const ids = ["12345:678", "12346:678", "12347:678", "12348:678", "12349:678"];
+    const app = await appWithTransport(async (request) => {
+      const url = new URL(request.url);
+      if (url.pathname === "/m1/api/year/2016/makes") return json([{ makeName: "Ford" }]);
+      if (url.pathname === "/m1/api/year/2016/make/Ford/models")
+        return json({ contentSource: "Ford", models: [{ id: fordModelId, model: "Expedition" }] });
+      if (url.pathname === fordEnginesPath) return json([
+        { model: "Expedition XLT", engines: [{ id: ids[0], name: "3.5 L V6" }, { id: ids[1], name: "3.5 L V6" }] },
+        { model: "Expedition XL", engines: [{ id: ids[2], name: "3.5 L V6" }] },
+        { engines: [{ id: ids[3] }] },
+        { model: "Expedition Touring", engines: [{ id: ids[4], name: "3.5 L V6" }] },
+      ]);
+      if (url.pathname === "/m1/api/source/Motor/vehicles")
+        return json(ids.map((vehicleId) => ({ vehicleId })));
+      if (url.pathname === `/m1/api/source/Ford/${fordModelId}/name`) {
+        const id = url.searchParams.get("motorVehicleId") ?? "";
+        checkedNames.push(id);
+        if (id === ids[0]) return json({ value: "Expedition XLT 4-Wheel Drive" });
+        if (id === ids[1]) return json("Expedition XLT RWD");
+        if (id === ids[2]) return json("Expedition XL 4x4 5.0 L");
+        if (id === ids[3]) return json("Expedition Limited 2WD 3.5 L");
+        if (id === ids[4]) return json("Expedition Touring 4x4 / 4x2");
+      }
+      throw new Error("Unexpected fixture route");
+    });
+    try {
+      const catalog = await app.inject({
+        method: "GET", url: "/v1/catalog/configurations?year=2016&make=Ford%20Truck&model=Expedition%204wd",
+      });
+      expect(catalog.statusCode, catalog.body).toBe(200);
+      const { items } = catalog.json();
+      expect(items.map((item: { label: string }) => item.label)).toEqual([
+        "Expedition XLT 3.5 L V6", "Expedition XLT 3.5 L V6", "Expedition XL 3.5 L V6",
+        "2016 Ford Truck configuration", "Expedition Touring 3.5 L V6",
+      ]);
+      expect(items[0].configuration).toBe(items[0].label);
+      expect(items[3]).not.toHaveProperty("configuration");
+      expect(checkedNames).toEqual([]);
+
+      const response = await app.inject({ method: "POST", url: "/v1/vehicle-resolutions", payload: fordSelector });
+      expect(response.statusCode, response.body).toBe(200);
+      expect(response.json().candidates).toEqual([expect.objectContaining({ label: "Expedition XLT 4-Wheel Drive" })]);
+      expect(response.json().candidates[0].opaque_ref).toBe(items[0].opaque_ref);
+      expect(checkedNames.sort()).toEqual(ids);
     } finally {
       await app.close();
     }

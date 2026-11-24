@@ -32,6 +32,14 @@ export function isMotorEngineId(value: unknown): value is string {
   return typeof value === "string" && /^[0-9]{1,20}:[0-9]{1,20}$/.test(value);
 }
 
+function fordModelSegment(params: UpstreamRouteParams): string {
+  if (typeof params.vehicleId !== "string" ||
+      !/^[0-9]{4}:Ford:[^:/\\?#%\x00-\x1f\x7f]{1,160}$/.test(params.vehicleId)) {
+    throw new ConnectorError("invalid_request", "Invalid Ford model reference", 400);
+  }
+  return segment(params, "vehicleId");
+}
+
 export const UPSTREAM_ROUTES = {
   years: {
     id: "years",
@@ -72,15 +80,19 @@ export const UPSTREAM_ROUTES = {
     id: "fordMotorVehicles",
     method: "GET",
     responseKind: "json",
-    path: (params) => {
-      if (typeof params.vehicleId !== "string" ||
-          !/^[0-9]{4}:Ford:[^:/\\?#%\x00-\x1f\x7f]{1,160}$/.test(params.vehicleId)) {
-        throw new ConnectorError("invalid_request", "Invalid Ford model reference", 400);
-      }
-      // This fixed lookup maps an advertised Ford model to Motor engine IDs.
-      return path("source", "Ford", segment(params, "vehicleId"), "motorvehicles");
-    },
+    path: (params) => path("source", "Ford", fordModelSegment(params), "motorvehicles"),
     query: [],
+  },
+  fordVehicleName: {
+    id: "fordVehicleName",
+    method: "GET",
+    responseKind: "json",
+    path: (params) => {
+      if (!isMotorEngineId(params.motorVehicleId))
+        throw new ConnectorError("invalid_request", "Invalid Motor engine reference", 400);
+      return path("source", "Ford", fordModelSegment(params), "name");
+    },
+    query: ["motorVehicleId"],
   },
   motorVehicleBatch: {
     id: "motorVehicleBatch",
@@ -219,7 +231,7 @@ export function buildUpstreamRequest(
   if (contentSource !== undefined && !allowedContentSources.includes(String(contentSource))) {
     throw new ConnectorError("invalid_request", "content source is not allowed", 400);
   }
-  if ((routeId === "fordMotorVehicles" || routeId === "motorVehicleBatch") &&
+  if ((routeId === "fordMotorVehicles" || routeId === "fordVehicleName" || routeId === "motorVehicleBatch") &&
       !allowedContentSources.includes("Motor")) {
     throw new ConnectorError("invalid_request", "Motor content source is not allowed", 400);
   }
