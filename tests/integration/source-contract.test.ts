@@ -183,6 +183,43 @@ describe("Bankone source contract", () => {
     await app.close();
   });
 
+  it("binds supplier article links and embedded assets without modifying the original HTML", async () => {
+    const html = '<p>Before</p><a href="/api/asset/local&#58;bulletin">Bulletin</a>'
+      + '<iframe src="/m1/api/asset/embedded" title="Embedded bulletin"></iframe>'
+      + '<object data="/api/asset/object-manual"></object><embed src="/api/asset/embed-manual">'
+      + '<a href="/api/asset/local:bulletin">Same bulletin again</a>'
+      + '<a href="https://external.invalid/api/asset/foreign">External</a>'
+      + '<a href="/api/asset/other?preview=1">Separate document</a>'
+      + '<a href="/api/source/Toyota/graphic/thumbnail">A graphic</a>'
+      + '<div href="/api/asset/unrelated" data-resource-ref="forged"></div><p>After</p>';
+    const pdf = Buffer.from("%PDF-1.7\n%%EOF\n");
+    const app = await appWithTransport(async (request) => {
+      if (request.url.includes("/article/a1")) return json({ html });
+      if (request.url.endsWith("/asset/local%3Abulletin"))
+        return { status: 200, headers: { "content-type": "application/pdf" }, body: pdf };
+      throw new Error("Unexpected upstream target");
+    });
+    const ref = encodeReference({ kind: "article", catalog: "Toyota", vehicleId: "v1", articleId: "a1" }, config.sourceRefs);
+    const response = await app.inject({ method: "GET", url: `/v1/resources/${ref}` });
+    expect(response.statusCode).toBe(200);
+    const body = response.json();
+    expect(body.content).toBe(html);
+    expect(body.sha256).toBe(createHash("sha256").update(html).digest("hex"));
+    expect(body.asset_bindings.map((binding: { source_url: string }) => binding.source_url)).toEqual([
+      "/api/asset/local:bulletin", "/m1/api/asset/embedded", "/api/asset/object-manual", "/api/asset/embed-manual",
+    ]);
+    for (const binding of body.asset_bindings) expect(body.asset_resource_refs).toContain(binding.resource_ref);
+    const asset = await app.inject({
+      method: "GET", url: `/v1/resources/${body.asset_bindings[0].resource_ref}`,
+      headers: { accept: "application/octet-stream" },
+    });
+    expect(asset.statusCode).toBe(200);
+    expect(asset.headers["x-source-media-type"]).toBe("application/pdf");
+    expect(asset.headers["x-source-sha256"]).toBe(createHash("sha256").update(pdf).digest("hex"));
+    expect(asset.rawPayload).toEqual(pdf);
+    await app.close();
+  });
+
   it("bounds image bindings to declared refs and preserves first source order", async () => {
     const html = Array.from({ length: 130 }, (_, index) => `<img src="/api/asset/figure-${index}">`).join("");
     const app = await appWithTransport(async () => json({ html }));

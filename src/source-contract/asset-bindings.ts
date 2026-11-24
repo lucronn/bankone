@@ -4,6 +4,9 @@ import { targetForUrl, type AssetTarget } from "../content/url-rewriter.js";
 
 export type AssetBinding = { source_url: string; resource_ref: string };
 const MAX_BINDINGS = 128;
+const RESOURCE_ATTRIBUTES = new Map([
+  ["img", "src"], ["a", "href"], ["iframe", "src"], ["object", "data"], ["embed", "src"],
+]);
 
 // Match the ingestion runtime's Python 3.14 HTMLParser attribute semantics.
 // Numeric references use html.unescape; named references use attribute mode.
@@ -23,7 +26,7 @@ function decodeSourceAttribute(value: string): string {
   });
 }
 
-/** Bind only actual image sources; never interpret provider-supplied ref attributes. */
+/** Bind resource URLs at their authored markup positions. Do not accept ref attributes. */
 export function collectAssetBindings(
   html: string,
   upstreamOrigin: string,
@@ -31,18 +34,22 @@ export function collectAssetBindings(
 ): AssetBinding[] {
   const bindings: AssetBinding[] = [];
   const seen = new Set<string>();
+  let resourceAttribute: string | undefined;
   let source: string | undefined;
   const parser = new Parser({
-    onopentagname() { source = undefined; },
+    onopentagname(name) {
+      resourceAttribute = RESOURCE_ATTRIBUTES.get(name);
+      source = undefined;
+    },
     onattribute(name, value) {
       // HTMLParser produces all attributes and dict(attrs) keeps the last one.
-      if (name === "src") source = decodeSourceAttribute(value);
+      if (name === resourceAttribute) source = decodeSourceAttribute(value);
     },
     onopentag(name) {
-      if (name !== "img" || !source || source.length > 2048 || /[\u0000-\u001f\u007f-\u009f]/.test(source)
+      if (!source || source.length > 2048 || /[\u0000-\u001f\u007f-\u009f]/.test(source)
         || bindings.length >= MAX_BINDINGS || seen.has(source)) return;
       const target = targetForUrl(source, { upstreamOrigin, connectorAssetUrl: () => "" });
-      if (!target) return;
+      if (!target || (name !== "img" && target.kind !== "asset")) return;
       const reference = register(target);
       if (!reference || reference.length > 2048) return;
       seen.add(source);

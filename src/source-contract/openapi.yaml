@@ -265,7 +265,7 @@ components:
             asset_bindings:
               type: array
               maxItems: 128
-              description: Authenticated connector bindings from exact decoded HTML image src values to declared opaque asset refs. Source content and its SHA-256 remain unchanged. Duplicate source URLs are omitted after their first occurrence.
+              description: Authenticated connector bindings from exact decoded HTML image, link, and embedded asset URLs to declared opaque asset refs. The content and SHA-256 describe the original source. Duplicate source URLs are omitted after their first occurrence.
               items:
                 type: object
                 additionalProperties: false
