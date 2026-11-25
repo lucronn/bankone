@@ -382,7 +382,7 @@ describe("Bankone source contract", () => {
 
   it("matches retained authored digests against existing vehicle-scoped references without supplier reads", async () => {
     let upstreamCalls = 0;
-    const rotated = { ...config, sourceRefs: {
+    const rotated: typeof config = { ...config, sourceRefs: {
       activeKeyId: "v2", keys: { ...config.sourceRefs.keys, v2: Buffer.alloc(32, 0x33) },
     } };
     const transport: HttpTransport = async () => {
