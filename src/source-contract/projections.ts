@@ -1,7 +1,7 @@
 import { createHash } from "node:crypto";
 import { ConnectorError } from "../errors.js";
 import type { UpstreamEnvelope } from "../upstream/upstream-client.js";
-import { encodeReference, type SourceReference } from "./references.js";
+import { articleReference, encodeReference } from "./references.js";
 import type { Config } from "../config.js";
 
 type RecordValue = Record<string, unknown>;
@@ -61,7 +61,7 @@ export function articleRows(envelope: UpstreamEnvelope<unknown>, catalog: string
     const title = textField(item, "title", "name") || articleId;
     const category = textField(item, "bucket", "bucketName", "articleType", "category");
     const component = textField(item, "component", "system", "componentName");
-    const common: SourceReference = { catalog, vehicleId, articleId, kind: "article" };
+    const common = articleReference(catalog, vehicleId, articleId);
     const laborId = textField(item, "laborArticleId", "labor_article_id", "laborId") || (item.hasLabor === true ? articleId : "");
     const graphicIds = Array.isArray(item.graphicIds) ? item.graphicIds : Array.isArray(item.imageIds) ? item.imageIds : [];
     const assetIds = Array.isArray(item.assetIds) ? item.assetIds : [];
