@@ -34,7 +34,7 @@ export function collectMarkupBindings(
   html: string,
   upstreamOrigin: string,
   register: (target: AssetTarget) => string | undefined,
-  bindArticle: (id: string) => ArticleLinkBinding | undefined,
+  bindArticle?: (id: string) => ArticleLinkBinding | undefined,
 ): { assets: AssetBinding[]; articles: ArticleLinkBinding[] } {
   const assets: AssetBinding[] = [];
   const articles: ArticleLinkBinding[] = [];
@@ -51,10 +51,10 @@ export function collectMarkupBindings(
     onopentagname(name) {
       resourceAttribute = RESOURCE_ATTRIBUTES.get(name);
       source = undefined;
-      documentLink = name === "mtr-doc-link";
+      documentLink = Boolean(bindArticle) && name === "mtr-doc-link";
       documentId = undefined;
       duplicateId = false;
-      hidden = (visibility.at(-1) ?? false) || NONDISPLAY_TAGS.has(name);
+      hidden = Boolean(bindArticle) && ((visibility.at(-1) ?? false) || NONDISPLAY_TAGS.has(name));
     },
     onattribute(name, value) {
       // HTMLParser produces all attributes and dict(attrs) keeps the last one.
@@ -63,12 +63,12 @@ export function collectMarkupBindings(
         duplicateId = documentId !== undefined;
         documentId = decodeSourceAttribute(value);
       }
-      if (name === "hidden" || (name === "aria-hidden" && decodeSourceAttribute(value).trim().toLowerCase() === "true")
-        || (name === "style" && HIDDEN_STYLE.test(decodeSourceAttribute(value)))) hidden = true;
+      if (bindArticle && (name === "hidden" || (name === "aria-hidden" && decodeSourceAttribute(value).trim().toLowerCase() === "true")
+        || (name === "style" && HIDDEN_STYLE.test(decodeSourceAttribute(value))))) hidden = true;
     },
     onopentag(name) {
-      visibility.push(hidden);
-      if (documentId && !hidden && !duplicateId && articles.length < MAX_BINDINGS
+      if (bindArticle) visibility.push(hidden);
+      if (bindArticle && documentId && !hidden && !duplicateId && articles.length < MAX_BINDINGS
         && documentId.length <= 512 && documentId.trim() === documentId
         && !/[\u0000-\u001f\u007f-\u009f]/.test(documentId) && !seenArticleIds.has(documentId)) {
         const binding = bindArticle(documentId);
@@ -86,7 +86,7 @@ export function collectMarkupBindings(
       seenAssets.add(source);
       assets.push({ source_url: source, resource_ref: reference });
     },
-    onclosetag() { visibility.pop(); },
+    onclosetag() { if (bindArticle) visibility.pop(); },
   }, { decodeEntities: false });
   parser.end(html);
   return { assets, articles };

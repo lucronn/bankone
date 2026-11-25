@@ -410,7 +410,15 @@ describe("Bankone source contract", () => {
       activeKeyId: "v2", keys: { ...config.sourceRefs.keys, v2: Buffer.alloc(32, 0x33) },
     } };
     const after = await appWithTransport(transport, rotated);
-    const response = await after.inject({ method: "GET", url: `/v1/resources/${opened.resource_ref}` });
+    const previousClient = await after.inject({ method: "GET", url: `/v1/resources/${opened.resource_ref}` });
+    expect(previousClient.statusCode).toBe(200);
+    expect(previousClient.json().content).toBe(html);
+    expect(previousClient.json()).not.toHaveProperty("article_link_bindings");
+    expect(previousClient.headers.vary).toContain("Prefer");
+    const response = await after.inject({
+      method: "GET", url: `/v1/resources/${opened.resource_ref}`,
+      headers: { prefer: 'respond-async, include="article-link-bindings"' },
+    });
     expect(response.statusCode).toBe(200);
     await after.close();
     const digest = (value: string) => createHash("sha256").update(value).digest("hex");
@@ -427,6 +435,7 @@ describe("Bankone source contract", () => {
     }, config.sourceRefs);
     expect(body.article_link_bindings[0].target_ref_sha256).not.toBe(digest(anotherVehicle));
     expect(response.body).not.toContain(target.opaque_ref);
+    expect(response.headers.vary).toContain("Prefer");
     expect(upstreamCalls).toHaveLength(2);
   });
 

@@ -87,6 +87,12 @@ paths:
       operationId: readResource
       parameters:
         - { name: opaqueRef, in: path, required: true, schema: { type: string, minLength: 1, maxLength: 2048 } }
+        - name: Prefer
+          in: header
+          required: false
+          description: Include authored article link identities on Bankone HTML resources.
+          schema: { type: string }
+          example: 'include="article-link-bindings"'
       responses:
         '200':
           description: Raw source bytes with provenance headers.
@@ -276,7 +282,7 @@ components:
             article_link_bindings:
               type: array
               maxItems: 128
-              description: Bankone HTML articles may bind an authored document ID to the SHA-256 of its opaque article reference in the same vehicle and catalog. The reference uses the key that encrypted the requested resource reference. A downstream catalog must confirm that the target exists in its authorized scope. The raw source and its digest are unchanged.
+              description: For requests opting in through Prefer, Bankone HTML articles may bind an authored document ID to the SHA-256 of its opaque article reference in the same vehicle and catalog. The reference uses the key that encrypted the requested resource reference. A downstream catalog must confirm that the target exists in its authorized scope. The raw source and its digest are unchanged.
               items:
                 type: object
                 additionalProperties: false
