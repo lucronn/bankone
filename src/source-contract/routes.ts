@@ -6,13 +6,14 @@ import type { UpstreamRouteId, UpstreamRouteParams } from "../upstream/route-reg
 import { isMotorEngineId } from "../upstream/route-registry.js";
 import type { UpstreamEnvelope } from "../upstream/upstream-client.js";
 import { articleRows, chooseCatalog, matchesMake, matchesModel, modelVehicleIds, normalizeLabel, reportedArticleCount, requireEnvelope, rows, sha256, sourceRevision, textField } from "./projections.js";
-import { decodeReference, encodeReference, type SourceReference } from "./references.js";
-import { collectAssetBindings } from "./asset-bindings.js";
+import { articleReference, decodeReference, encodeReference, type SourceReference } from "./references.js";
+import { collectMarkupBindings } from "./asset-bindings.js";
 import type { AssetTarget } from "../content/url-rewriter.js";
 import { normalizeHtml } from "../content/html-normalizer.js";
 
 const PAGE_SIZE = 100;
 const FORD_NAME_LOOKUP_LIMIT = 16;
+const ARTICLE_LINK_PREFERENCE = 'include="article-link-bindings"';
 type RecordValue = Record<string, unknown>;
 type SourceContext = { requestId: string; request: FastifyRequest; reply: FastifyReply; deps: ApiRouteDependencies };
 type Fetched = { envelope: UpstreamEnvelope<unknown>; bytes: Buffer };
@@ -438,8 +439,21 @@ export function registerSourceContractRoutes(app: FastifyInstance, deps: ApiRout
         assetResourceRefs.add(assetRef);
         return assetRef;
       };
-      const assetBindings = rawHtml === undefined ? [] : collectAssetBindings(rawHtml, deps.config.upstream.apiOrigin, registerAsset);
+      const preferences = ctx.request.headers.prefer;
+      const includeArticleLinks = typeof preferences === "string"
+        && preferences.split(",").some(value => value.trim() === ARTICLE_LINK_PREFERENCE);
+      const sourceKeyring = includeArticleLinks
+        ? { ...deps.config.sourceRefs, activeKeyId: opaqueRef.split(".")[1] } : undefined;
+      const bindArticle = sourceKeyring ? (id: string) => {
+        if (id === ref.articleId) return undefined;
+        const target = encodeReference(articleReference(ref.catalog!, ref.vehicleId!, id), sourceKeyring);
+        return { source_id_sha256: sha256(Buffer.from(id)), target_ref_sha256: sha256(Buffer.from(target)) };
+      } : undefined;
+      const bindings = rawHtml === undefined ? undefined : collectMarkupBindings(
+        rawHtml, deps.config.upstream.apiOrigin, registerAsset, bindArticle,
+      );
       if (rawHtml !== undefined) {
+        ctx.reply.header("vary", [ctx.reply.getHeader("vary"), "Prefer"].filter(Boolean).join(", "));
         // Scan provider markup inside Bankone to discover resource relationships.
         // The normalized presentation is deliberately discarded: `content` stays raw.
         normalizeHtml(rawHtml, {
@@ -460,7 +474,12 @@ export function registerSourceContractRoutes(app: FastifyInstance, deps: ApiRout
       const metadata = envelope(ctx, [result.bytes], locator(ref.kind, { catalog: ref.catalog, vehicleId: ref.vehicleId, articleId: ref.articleId }));
       const contentHash = sha256(Buffer.from(content));
       resourceHeaders(ctx, metadata, contentHash, mediaType);
-      return { ...metadata, kind: ref.kind, media_type: mediaType, content, sha256: contentHash, ...(assetResourceRefs.size ? { asset_resource_refs: [...assetResourceRefs] } : {}), ...(assetBindings.length ? { asset_bindings: assetBindings } : {}) };
+      return {
+        ...metadata, kind: ref.kind, media_type: mediaType, content, sha256: contentHash,
+        ...(assetResourceRefs.size ? { asset_resource_refs: [...assetResourceRefs] } : {}),
+        ...(bindings?.assets.length ? { asset_bindings: bindings.assets } : {}),
+        ...(bindings?.articles.length ? { article_link_bindings: bindings.articles } : {}),
+      };
     }
     if (ref.kind === "asset" && ref.assetId && (ref.assetKind === "graphic" || ref.assetKind === "asset")) {
       if (ref.assetKind === "graphic" && (!ref.catalog || !deps.config.upstream.allowedContentSources.includes(ref.catalog))) fail("INVALID_INPUT", "Invalid asset reference", 400);

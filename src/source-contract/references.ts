@@ -17,6 +17,10 @@ export type SourceReference = {
   revision?: string;
 };
 
+export function articleReference(catalog: string, vehicleId: string, articleId: string): SourceReference {
+  return { catalog, vehicleId, articleId, kind: "article" };
+}
+
 // A deterministic nonce makes a given source identity stable across processes.
 // It is derived from the entire plaintext, so distinct identities use distinct nonces.
 export function encodeReference(reference: SourceReference, keyring: ReferenceKeys): string {

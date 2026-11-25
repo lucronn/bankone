@@ -380,6 +380,65 @@ describe("Bankone source contract", () => {
   });
 
 
+  it("binds exact authored document IDs to existing same-vehicle article refs after key rotation", async () => {
+    const targetId = "1234567:12345678";
+    const html = '<p><mtr-doc-link id="1234567&#58;12345678">Timing Cover</mtr-doc-link></p>'
+      + '<mtr-doc-link id="1234567:12345678">Timing Cover</mtr-doc-link>'
+      + '<mtr-doc-link id="duplicate" id="forged">Duplicate</mtr-doc-link>'
+      + '<template><mtr-doc-link id="template">Template</mtr-doc-link></template>'
+      + '<section aria-hidden="true"><img src="x"><mtr-doc-link id="hidden">Hidden</mtr-doc-link></section>'
+      + '<div style="display : none !important"><mtr-doc-link id="css-hidden">Hidden</mtr-doc-link></div>'
+      + '<mtr-doc-link id="a1">Source article</mtr-doc-link>';
+    const upstreamCalls: string[] = [];
+    const transport: HttpTransport = async (request) => {
+      upstreamCalls.push(new URL(request.url).pathname);
+      if (request.url.endsWith("/articles/v2")) return json({ articleDetails: [
+        { id: "a1", title: "Engine Procedure" },
+        { id: "other-title-match", title: "Timing Cover" },
+        { id: targetId, title: "Timing Cover" },
+      ] });
+      if (request.url.endsWith("/article/a1")) return json({ html });
+      throw new Error("Unexpected target request");
+    };
+    const before = await appWithTransport(transport);
+    const vehicleRef = encodeReference({ kind: "vehicle", catalog: "Toyota", vehicleId: "v1" }, config.sourceRefs);
+    const index = await before.inject({ method: "GET", url: `/v1/vehicles/${vehicleRef}/articles` });
+    expect(index.statusCode).toBe(200);
+    await before.close();
+    const [opened, duplicateTitle, target] = index.json().articles;
+    const rotated = { ...config, sourceRefs: {
+      activeKeyId: "v2", keys: { ...config.sourceRefs.keys, v2: Buffer.alloc(32, 0x33) },
+    } };
+    const after = await appWithTransport(transport, rotated);
+    const previousClient = await after.inject({ method: "GET", url: `/v1/resources/${opened.resource_ref}` });
+    expect(previousClient.statusCode).toBe(200);
+    expect(previousClient.json().content).toBe(html);
+    expect(previousClient.json()).not.toHaveProperty("article_link_bindings");
+    expect(previousClient.headers.vary).toContain("Prefer");
+    const response = await after.inject({
+      method: "GET", url: `/v1/resources/${opened.resource_ref}`,
+      headers: { prefer: 'respond-async, include="article-link-bindings"' },
+    });
+    expect(response.statusCode).toBe(200);
+    await after.close();
+    const digest = (value: string) => createHash("sha256").update(value).digest("hex");
+    const body = response.json();
+    expect(body.content).toBe(html);
+    expect(body.sha256).toBe(digest(html));
+    expect(body.article_link_bindings).toEqual([{
+      source_id_sha256: digest(targetId),
+      target_ref_sha256: digest(target.opaque_ref),
+    }]);
+    expect(body.article_link_bindings[0].target_ref_sha256).not.toBe(digest(duplicateTitle.opaque_ref));
+    const anotherVehicle = encodeReference({
+      catalog: "Toyota", vehicleId: "v2", articleId: targetId, kind: "article",
+    }, config.sourceRefs);
+    expect(body.article_link_bindings[0].target_ref_sha256).not.toBe(digest(anotherVehicle));
+    expect(response.body).not.toContain(target.opaque_ref);
+    expect(response.headers.vary).toContain("Prefer");
+    expect(upstreamCalls).toHaveLength(2);
+  });
+
   it("binds decoded image sources to authenticated refs without changing raw source evidence", async () => {
     const html = '<p>Before</p><img src="api/asset/second"><table><tr><td><img src="/m1/api/asset/first&#58;diagram"></td></tr></table>'
       + '<img src="api/asset/second"><img src="/api/asset/amp&amp;part">'
