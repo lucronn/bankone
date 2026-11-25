@@ -82,6 +82,45 @@ paths:
             application/json:
               schema: { $ref: '#/components/schemas/ArticleListResponse' }
         default: { $ref: '#/components/responses/Error' }
+  /v1/vehicles/{opaqueRef}/article-link-match:
+    post:
+      operationId: matchArticleLinkReferences
+      description: Match retained authored ID digests against submitted existing article references in the given vehicle and catalog. This operation uses authenticated reference identities and makes no supplier requests.
+      parameters:
+        - { name: opaqueRef, in: path, required: true, schema: { type: string, minLength: 1, maxLength: 1024 } }
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [authored_id_sha256, article_refs]
+              additionalProperties: false
+              properties:
+                authored_id_sha256: { type: array, minItems: 1, maxItems: 128, uniqueItems: true, items: { type: string, pattern: '^[a-f0-9]{64}$' } }
+                article_refs: { type: array, minItems: 1, maxItems: 256, uniqueItems: true, items: { type: string, minLength: 1, maxLength: 2048 } }
+      responses:
+        '200':
+          description: Exact matches in candidate order. A digest can have multiple matching existing references.
+          content:
+            application/json:
+              schema:
+                allOf:
+                  - { $ref: '#/components/schemas/SourceEnvelope' }
+                  - type: object
+                    required: [article_link_bindings]
+                    additionalProperties: false
+                    properties:
+                      request_id: {}
+                      provider: { const: bankone }
+                      source_revision: {}
+                      fetched_at: {}
+                      source_locator: {}
+                      article_link_bindings:
+                        type: array
+                        maxItems: 256
+                        items: { $ref: '#/components/schemas/ArticleLinkBinding' }
+        default: { $ref: '#/components/responses/Error' }
   /v1/resources/{opaqueRef}:
     get:
       operationId: readResource
@@ -283,13 +322,14 @@ components:
               type: array
               maxItems: 128
               description: For requests opting in through Prefer, Bankone HTML articles may bind an authored document ID to the SHA-256 of its opaque article reference in the same vehicle and catalog. The reference uses the key that encrypted the requested resource reference. A downstream catalog must confirm that the target exists in its authorized scope. The raw source and its digest are unchanged.
-              items:
-                type: object
-                additionalProperties: false
-                required: [source_id_sha256, target_ref_sha256]
-                properties:
-                  source_id_sha256: { type: string, pattern: '^[a-f0-9]{64}$' }
-                  target_ref_sha256: { type: string, pattern: '^[a-f0-9]{64}$' }
+              items: { $ref: '#/components/schemas/ArticleLinkBinding' }
+    ArticleLinkBinding:
+      type: object
+      additionalProperties: false
+      required: [source_id_sha256, target_ref_sha256]
+      properties:
+        source_id_sha256: { type: string, pattern: '^[a-f0-9]{64}$' }
+        target_ref_sha256: { type: string, pattern: '^[a-f0-9]{64}$' }
     BinaryResource:
       allOf:
         - { $ref: '#/components/schemas/SourceEnvelope' }

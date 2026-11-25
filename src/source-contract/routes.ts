@@ -7,7 +7,7 @@ import { isMotorEngineId } from "../upstream/route-registry.js";
 import type { UpstreamEnvelope } from "../upstream/upstream-client.js";
 import { articleRows, chooseCatalog, matchesMake, matchesModel, modelVehicleIds, normalizeLabel, reportedArticleCount, requireEnvelope, rows, sha256, sourceRevision, textField } from "./projections.js";
 import { articleReference, decodeReference, encodeReference, type SourceReference } from "./references.js";
-import { collectMarkupBindings } from "./asset-bindings.js";
+import { collectMarkupBindings, type ArticleLinkBinding } from "./asset-bindings.js";
 import type { AssetTarget } from "../content/url-rewriter.js";
 import { normalizeHtml } from "../content/html-normalizer.js";
 
@@ -419,6 +419,55 @@ export function registerSourceContractRoutes(app: FastifyInstance, deps: ApiRout
     onlyKeys(body, ["query", "cursor"]);
     const search = string(body.query, "query", 512);
     return articles(ctx, search);
+  });
+
+  register(app, "post", "/v1/vehicles/:opaqueRef/article-link-match", deps, async (ctx) => {
+    ctx.reply.header("cache-control", "private, no-store");
+    const admission = deps.clientRateLimiter.check(ctx.request.ip || "unknown");
+    if (!admission.allowed) {
+      ctx.reply.header("retry-after", String(admission.retryAfterSeconds));
+      fail("RATE_LIMITED", "Caller request rate exceeded", 429, true);
+    }
+    const { opaqueRef } = ctx.request.params as { opaqueRef: string };
+    const requested = decodeReference(opaqueRef, deps.config.sourceRefs, "vehicle");
+    if (!requested.catalog || !requested.vehicleId || !deps.config.upstream.allowedContentSources.includes(requested.catalog)) {
+      fail("INVALID_INPUT", "Invalid vehicle reference", 400);
+    }
+
+    const query = ctx.request.query as RecordValue;
+    onlyKeys(query, []);
+    const body = ctx.request.body as RecordValue;
+    if (!body || typeof body !== "object" || Array.isArray(body)) fail("INVALID_INPUT", "match body must be an object", 400);
+    onlyKeys(body, ["authored_id_sha256", "article_refs"]);
+    const { authored_id_sha256: authoredIds, article_refs: articleRefs } = body;
+    if (!Array.isArray(authoredIds) || authoredIds.length < 1 || authoredIds.length > 128
+        || !authoredIds.every(id => typeof id === "string" && /^[a-f0-9]{64}$/.test(id))
+        || new Set(authoredIds).size !== authoredIds.length) {
+      fail("INVALID_INPUT", "Invalid authored ID digests", 400);
+    }
+    if (!Array.isArray(articleRefs) || articleRefs.length < 1 || articleRefs.length > 256
+        || !articleRefs.every(ref => typeof ref === "string" && ref.length <= 2048)
+        || new Set(articleRefs).size !== articleRefs.length) {
+      fail("INVALID_INPUT", "Invalid candidate article references", 400);
+    }
+
+    const expected = new Set<string>(authoredIds);
+    const bindings: ArticleLinkBinding[] = [];
+    for (const token of articleRefs) {
+      const ref = decodeReference(token, deps.config.sourceRefs, "article");
+      if (ref.catalog !== requested.catalog || ref.vehicleId !== requested.vehicleId
+          || typeof ref.articleId !== "string" || !ref.articleId) {
+        fail("INVALID_INPUT", "Candidate article does not belong to the vehicle reference", 400);
+      }
+      const sourceDigest = sha256(Buffer.from(ref.articleId));
+      if (!expected.has(sourceDigest)) continue;
+      bindings.push({ source_id_sha256: sourceDigest, target_ref_sha256: sha256(Buffer.from(token)) });
+    }
+    const identity = { vehicle: opaqueRef, authoredIds, articleRefs };
+    return {
+      ...envelope(ctx, [Buffer.from(JSON.stringify({ identity, bindings }))], locator("article-link-match", identity)),
+      article_link_bindings: bindings,
+    };
   });
 
   register(app, "get", "/v1/resources/:opaqueRef", deps, async (ctx) => {

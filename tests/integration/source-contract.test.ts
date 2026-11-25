@@ -380,6 +380,63 @@ describe("Bankone source contract", () => {
   });
 
 
+  it("matches retained authored digests against existing vehicle-scoped references without supplier reads", async () => {
+    let upstreamCalls = 0;
+    const rotated: typeof config = { ...config, sourceRefs: {
+      activeKeyId: "v2", keys: { ...config.sourceRefs.keys, v2: Buffer.alloc(32, 0x33) },
+    } };
+    const transport: HttpTransport = async () => {
+      upstreamCalls++;
+      throw new Error("Reference matching must not request the supplier");
+    };
+    const app = await createApp({
+      config: rotated,
+      upstreamClient: new UpstreamApiClient(rotated, transport),
+      sessionManager: new SessionManager(adapter, store, { refreshSkewSeconds: 300 }),
+      apiKeyVerifier: async (key, provider) => key === "fixture-service-key" && provider === "bankone",
+    });
+    const targetId = "1234567:12345678";
+    const token = (articleId: string, vehicleId = "v1", keyring = rotated.sourceRefs, catalog = "Toyota") =>
+      encodeReference({ catalog, vehicleId, articleId, kind: "article" }, keyring);
+    const older = token(targetId, "v1", config.sourceRefs);
+    const current = token(targetId);
+    const other = token("other-id");
+    const vehicle = encodeReference({ kind: "vehicle", catalog: "Toyota", vehicleId: "v1" }, config.sourceRefs);
+    const url = `/v1/vehicles/${vehicle}/article-link-match`;
+    const digest = (value: string) => createHash("sha256").update(value).digest("hex");
+    const body = { authored_id_sha256: [digest(targetId), digest("unindexed")], article_refs: [older, other, current] };
+
+    const unsigned = await app.inject({ method: "POST", url, payload: body });
+    expect(unsigned.statusCode).toBe(401);
+    const send = (payload: Record<string, unknown>, path = url) => app.inject({
+      method: "POST", url: path, payload, headers: { authorization: "Bearer fixture-service-key" },
+    });
+    const result = await send(body);
+    expect(result.statusCode).toBe(200);
+    expect(result.headers["cache-control"]).toContain("no-store");
+    expect(result.json()).toMatchObject({
+      provider: "bankone",
+      source_revision: expect.stringMatching(/^sha256:[0-9a-f]{64}$/),
+      article_link_bindings: [older, current].map(ref => ({
+        source_id_sha256: digest(targetId), target_ref_sha256: digest(ref),
+      })),
+    });
+    for (const secret of [older, current, other, targetId, vehicle]) expect(result.body).not.toContain(secret);
+    expect((await send({ ...body, article_refs: [other] })).json().article_link_bindings).toEqual([]);
+
+    for (const refs of [
+      [token(targetId, "v2")], [token(targetId, "v1", rotated.sourceRefs, "Motor")], [vehicle],
+      [older, older], ["invalid-reference"], new Array(257).fill(other),
+    ]) {
+      expect((await send({ ...body, article_refs: refs })).statusCode).toBe(400);
+    }
+    expect((await send({ ...body, authored_id_sha256: [targetId] })).statusCode).toBe(400);
+    expect((await send({ ...body, extra: true })).statusCode).toBe(400);
+    expect((await send(body, url + "?scope=untrusted")).statusCode).toBe(400);
+    expect(upstreamCalls).toBe(0);
+    await app.close();
+  });
+
   it("binds exact authored document IDs to existing same-vehicle article refs after key rotation", async () => {
     const targetId = "1234567:12345678";
     const html = '<p><mtr-doc-link id="1234567&#58;12345678">Timing Cover</mtr-doc-link></p>'
