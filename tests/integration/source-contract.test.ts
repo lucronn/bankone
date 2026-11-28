@@ -174,6 +174,30 @@ describe("Bankone source contract", () => {
     }
   });
 
+  it("resolves an advertised Ford model with a program suffix", async () => {
+    const selector = { year: 2023, make: "Ford Truck", model: "Escape 4wd", configuration: "2.5L", region: "US" };
+    const mappingPath = "/m1/api/source/Ford/2023%3AFord%3AEscape%20-%20TC%20(CX482%20NA)/motorvehicles";
+    const app = await appWithTransport(async (request) => {
+      const path = new URL(request.url).pathname;
+      if (path === "/m1/api/year/2023/makes") return json([{ makeName: "Ford" }]);
+      if (path === "/m1/api/year/2023/make/Ford/models") {
+        return json({ contentSource: "Ford", models: [{ id: "2023%3AFord%3AEscape+-+TC+(CX482+NA)", model: "Escape" }] });
+      }
+      if (path === mappingPath) return json([{ model: "Escape", engines: [{ id: "12345:678", name: "2.5 L" }] }]);
+      if (path === "/m1/api/source/Motor/vehicles" && request.method === "POST") {
+        return json([{ vehicleId: "12345:678", vehicleName: "Escape 2.5 L 4WD", market: "US" }]);
+      }
+      throw new Error(`Unexpected fixture route: ${path}`);
+    });
+    try {
+      const response = await app.inject({ method: "POST", url: "/v1/vehicle-resolutions", payload: selector });
+      expect(response.statusCode, response.body).toBe(200);
+      expect(response.json().candidates).toEqual([expect.objectContaining({ label: "Escape 2.5 L 4WD" })]);
+    } finally {
+      await app.close();
+    }
+  });
+
   it.each([
     { reason: "missing Ford model ID", model: { model: "Expedition" }, engines: undefined, status: 502 },
     { reason: "double-encoded Ford model ID", model: { id: "2016%253AFord%253AExpedition", model: "Expedition" }, engines: undefined, status: 502 },

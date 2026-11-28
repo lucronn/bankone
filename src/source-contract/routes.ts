@@ -27,6 +27,7 @@ const driveAliases: Record<string, string> = {
   allwheeldrive: "awd", frontwheeldrive: "fwd", rearwheeldrive: "rwd",
 };
 const displacementWords = /(?<![\d.])(\d+(?:\.\d+)?)\s*l\b/gi;
+const fordProgramSuffix = / - [A-Z0-9]+ \([A-Z0-9]+(?: [A-Z0-9]+)*\)$/;
 
 function fail(code: string, message: string, status: number, retryable = false): never {
   throw Object.assign(new Error(message), { sourceCode: code, status, retryable });
@@ -94,6 +95,10 @@ function fordFamily(text: string): string {
   return normalizeLabel(text.replace(driveWords, ""));
 }
 
+function fordModelIdFamily(name: string): string {
+  return fordFamily(name.replace(fordProgramSuffix, ""));
+}
+
 function fordVariantMatch(labels: string, engine: string, requestedEngine: number | undefined,
     requestedDrive: Set<string>, requestedTrim: string): boolean | undefined {
   const knownDrive = drivetrainLabels(labels);
@@ -109,14 +114,15 @@ function fordVariantMatch(labels: string, engine: string, requestedEngine: numbe
 function advertisedFordModelId(selector: VehicleSelector, model: RecordValue): string {
   let modelId: string;
   try {
-    modelId = decodeURIComponent(textField(model, "id"));
+    // Ford encodes spaces in advertised IDs as either '+' or '%20'.
+    modelId = decodeURIComponent(textField(model, "id").replace(/\+/g, " "));
   } catch {
     fail("INVALID_UPSTREAM_RESPONSE", "Ford model identity is invalid", 502);
   }
   const [year, make, name, ...suffix] = modelId.split(":");
   if (year !== String(selector.year) || make !== "Ford" || !name || suffix.length ||
       !/^[^:/\\?#%\x00-\x1f\x7f]{1,160}$/.test(name) ||
-      fordFamily(name) !== fordFamily(selector.model)) {
+      fordModelIdFamily(name) !== fordFamily(selector.model)) {
     fail("INVALID_UPSTREAM_RESPONSE", "Ford model identity is invalid", 502);
   }
   return modelId;
@@ -364,7 +370,7 @@ export function registerSourceContractRoutes(app: FastifyInstance, deps: ApiRout
     if (result.fordModelId && needsFordName.length) {
       if (needsFordName.length > FORD_NAME_LOOKUP_LIMIT)
         fail("INVALID_UPSTREAM_RESPONSE", "Ford lookup lacks required vehicle details", 502, true);
-      const model = fordFamily(result.fordModelId.split(":")[2]);
+      const model = fordModelIdFamily(result.fordModelId.split(":")[2]);
       const names = await Promise.all(needsFordName.map(async (item) => {
         const response = await fetchSource(ctx, "fordVehicleName", {
           vehicleId: result.fordModelId, motorVehicleId: item.vehicleId,
